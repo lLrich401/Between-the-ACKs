@@ -185,15 +185,21 @@ def probe_mode(samples):
 
 
 def main():
-    global HOST, UDP_PORTS
+    global HOST, UDP_PORTS, GATE, C2
     ap = argparse.ArgumentParser()
     ap.add_argument("host")
     ap.add_argument("--probe", type=int, default=0)
+    ap.add_argument("--gate", type=int, default=GATE,
+                    help="external TCP port assigned for the gate (default 9001)")
+    ap.add_argument("--c2", type=int, default=C2,
+                    help="external TCP port assigned for the finale (default 9002)")
     ap.add_argument("--udp-ports", default="",
                     help="comma-separated external UDP ports in Specfile order "
                          "(e.g. Dreamhack assigned ports for 20001..20002)")
     args = ap.parse_args()
     HOST = args.host
+    GATE = args.gate
+    C2 = args.c2
     if args.udp_ports:
         UDP_PORTS = [int(p) for p in args.udp_ports.split(",")]
     if args.probe:
