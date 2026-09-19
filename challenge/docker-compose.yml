@@ -1,0 +1,16 @@
+services:
+  betweentheacks:
+    build: .
+    container_name: betweentheacks
+    restart: unless-stopped
+    ports:
+      - "9001:9001/tcp"
+      - "9002:9002/tcp"
+      - "20000-25000:20000-25000/udp"
+    environment:
+      BTA_FLAG: "LR{b3tw33n_th3_ACKs_1s_wh3r3_th3_pr0t0c0l_l1v3s}"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
