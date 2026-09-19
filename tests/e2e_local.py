@@ -39,9 +39,9 @@ def main():
         sessions = []
         for i in range(solver.NFRAG):
             sess = solver.run_session(verbose=True)
-            tk = solver.udp_fetch(sess)
+            tk, uport = solver.udp_fetch(sess)
             print(f"[+] session {i} sid={sess['sid'].hex()} l3={sess['l3']} "
-                  f"udp_port={solver.udp_port_for(sess['l3'])} tk={tk.hex()}")
+                  f"udp_port={uport} tk={tk.hex()}")
             solver.finale(sess, tk, verbose=True)
             sessions.append(sess)
         flag = solver.decode(sessions).decode(errors="replace")

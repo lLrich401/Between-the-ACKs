@@ -17,6 +17,12 @@ NFRAG = 4
 
 DELTA_MIN = 60.0
 FIN_DELTA_MAX = 95.0
+SESSION_RETRIES = 8
+UDP_TRIES = 4
+
+
+def log(msg):
+    print(msg, flush=True)
 
 
 def connect(port):
@@ -63,16 +69,45 @@ def banner_obs():
     d1, mA = timed_frame(s, 10.0)
     d2, mB = timed_frame(s, 10.0)
     s.close()
-    a = len(d1) - 24
     delta = mA - mB
-    shaped = abs(delta) >= DELTA_MIN
-    b = 0 if delta < 0 else 1
-    return dict(magic=d1[0], a=a, b=b, sid=d1[1:5], d1_ms=mA, d2_ms=mB,
-                delta=delta, shaped=shaped)
+    return dict(magic=d1[0], a=len(d1) - 24, b=0 if delta < 0 else 1,
+                sid=d1[1:5], d1_ms=mA, d2_ms=mB, delta=delta,
+                shaped=abs(delta) >= DELTA_MIN)
+
+
+def udp_port_for(l3):
+    idx = l3 % NUDP
+    if UDP_PORTS:
+        return UDP_PORTS[idx]
+    return UDP_BASE + idx
+
+
+def udp_fetch(sess):
+    port = udp_port_for(sess["l3"])
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    u.settimeout(3.0)
+    try:
+        candidates = [port]
+        if UDP_PORTS:
+            candidates += [p for p in UDP_PORTS if p != port]
+        else:
+            candidates += [UDP_BASE + i for i in range(NUDP) if UDP_BASE + i != port]
+        for p in candidates:
+            for _ in range(UDP_TRIES):
+                u.sendto(sess["sid"], (HOST, p))
+                try:
+                    tk, _ = u.recvfrom(64)
+                except socket.timeout:
+                    continue
+                if len(tk) == 8:
+                    return tk, p
+    finally:
+        u.close()
+    raise RuntimeError(f"udp silent on {port}")
 
 
 def run_session(verbose=False):
-    for _ in range(6):
+    for _ in range(SESSION_RETRIES):
         s = connect(GATE)
         shaped_probe(s)
         d1, mA = timed_frame(s, 10.0)
@@ -86,13 +121,13 @@ def run_session(verbose=False):
         sid = d1[1:5]
         tok = bytes([(3 * a + 5 * b + 0x41) & 0xFF])
         s.sendall(tok)
-        resp, ms2 = timed_frame(s, 10.0)
+        resp, _ = timed_frame(s, 10.0)
         if resp[0] != 0xC2 or resp[1:5] != sid:
             s.close()
-            time.sleep(0.2)
+            time.sleep(0.3)
             continue
         if verbose:
-            print(f"[+] token ok a={a} b={b} sid={sid.hex()}")
+            log(f"[+] token ok a={a} b={b} sid={sid.hex()}")
         for i in range(4):
             s.sendall(bytes([sid[i]]))
             echo = recv_n(s, 1, 5.0)
@@ -109,31 +144,6 @@ def run_session(verbose=False):
         c = 0 if hdelta < 0 else 1
         return dict(a=a, b=b, c=c, sid=sid, l3=len(hc1), hc_ms=hA)
     raise RuntimeError("token rejected repeatedly")
-
-
-def udp_port_for(l3):
-    idx = l3 % NUDP
-    if UDP_PORTS:
-        return UDP_PORTS[idx]
-    return UDP_BASE + idx
-
-
-def udp_fetch(sess):
-    port = udp_port_for(sess["l3"])
-    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    u.settimeout(3.0)
-    try:
-        for _ in range(3):
-            u.sendto(sess["sid"], (HOST, port))
-            try:
-                tk, _ = u.recvfrom(64)
-            except socket.timeout:
-                continue
-            if len(tk) == 8:
-                return tk
-    finally:
-        u.close()
-    raise RuntimeError(f"udp silent on {port}")
 
 
 def finale(sess, tk, verbose=False):
@@ -156,8 +166,8 @@ def finale(sess, tk, verbose=False):
     sess["leak"] = leak
     sess["blob"] = blob
     if verbose:
-        print(f"[+] finale leak={leak:#06x} lens={[o[0] for o in obs]} "
-              f"deltas={[round(o[1]) for o in obs]}")
+        log(f"[+] finale leak={leak:#06x} lens={[o[0] for o in obs]} "
+            f"deltas={[round(o[1]) for o in obs]}")
     return leak, blob
 
 
@@ -176,12 +186,40 @@ def probe_mode(samples):
     lens = []
     deltas = []
     for _ in range(samples):
-        o = banner_obs()
-        lens.append(24 + o["a"])
-        deltas.append(o["delta"])
-    print(f"banner payload length: min={min(lens)} max={max(lens)} distinct={len(set(lens))}")
+        s = connect(GATE)
+        shaped_probe(s)
+        d1, mA = timed_frame(s, 10.0)
+        d2, mB = timed_frame(s, 10.0)
+        s.close()
+        lens.append(len(d1))
+        deltas.append(mA - mB)
+    print(f"banner payload length: min={min(lens)-24} max={max(lens)-24} "
+          f"distinct={len(set(lens))}")
     print(f"delay-pair delta: min={min(deltas):.1f} max={max(deltas):.1f} "
           f"n_pos={sum(1 for d in deltas if d > 0)} n_neg={sum(1 for d in deltas if d < 0)}")
+
+
+def full_run(verbose=True):
+    sessions = []
+    for i in range(NFRAG):
+        for attempt in range(SESSION_RETRIES):
+            try:
+                sess = run_session(verbose=verbose)
+                tk, uport = udp_fetch(sess)
+                log(f"[+] session {i} sid={sess['sid'].hex()} l3={sess['l3']} "
+                    f"udp_port={uport} tk={tk.hex()}")
+                finale(sess, tk, verbose=verbose)
+                sessions.append(sess)
+                break
+            except (RuntimeError, EOFError, ConnectionResetError, socket.timeout, OSError) as e:
+                log(f"[-] attempt {attempt + 1}: {e}")
+                time.sleep(1.0)
+        else:
+            raise SystemExit("session failed repeatedly")
+        time.sleep(1.2)
+    flag = decode(sessions)
+    log("FLAG: " + flag.decode(errors="replace"))
+    return flag
 
 
 def main():
@@ -205,26 +243,7 @@ def main():
     if args.probe:
         probe_mode(args.probe)
         return
-    sessions = []
-    for i in range(NFRAG):
-        for attempt in range(5):
-            try:
-                sess = run_session(verbose=True)
-                tk = udp_fetch(sess)
-                port = udp_port_for(sess["l3"])
-                print(f"[+] session {i} sid={sess['sid'].hex()} l3={sess['l3']} "
-                      f"udp_port={port} tk={tk.hex()}")
-                finale(sess, tk, verbose=True)
-                sessions.append(sess)
-                break
-            except (RuntimeError, EOFError, ConnectionResetError, socket.timeout, OSError) as e:
-                print(f"[-] attempt {attempt + 1}: {e}", file=sys.stderr)
-                time.sleep(1.0)
-        else:
-            raise SystemExit("session failed repeatedly")
-        time.sleep(1.2)
-    flag = decode(sessions)
-    print("FLAG:", flag.decode(errors="replace"))
+    full_run()
 
 
 if __name__ == "__main__":

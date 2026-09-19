@@ -109,7 +109,7 @@ def test_token_bruteforce_punish():
 
 def test_replay_rejected():
     sess = solver.run_session()
-    tk = solver.udp_fetch(sess)
+    tk, uport = solver.udp_fetch(sess)
     solver.finale(sess, tk)
     s = solver.connect(9002)
     s.sendall(sess["sid"] + tk)
