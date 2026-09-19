@@ -6,7 +6,7 @@ services:
     ports:
       - "9001:9001/tcp"
       - "9002:9002/tcp"
-      - "20000-25000:20000-25000/udp"
+      - "20001-20002:20001-20002/udp"
     environment:
       BTA_FLAG: "LR{b3tw33n_th3_ACKs_1s_wh3r3_th3_pr0t0c0l_l1v3s}"
     deploy:

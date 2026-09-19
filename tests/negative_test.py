@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(BASE, "solve"))
 import solver
 
 HOST = "127.0.0.1"
-UDP_BASE = 20000
+UDP_BASE = 20001
 
 
 def wait_port(port, timeout=10):
@@ -38,19 +38,24 @@ def timed_frame(s, timeout=15.0):
 
 
 def test_probe_decoy():
-    s = solver.connect(9001)
-    s.sendall(b"A" * 16)
-    d1, mA = timed_frame(s, 10)
-    d2, mB = timed_frame(s, 10)
-    assert d1[0] == 0xC1
-    delta = mA - mB
-    assert abs(delta) < 60, f"decoy banner should have ~equal delays, delta={delta:.0f}ms"
-    a = len(d1) - 24
-    b = 0 if delta < 0 else 1
-    sid = d1[1:5]
-    s.sendall(bytes([(3 * a + 5 * b + 0x41) & 0xFF]))
-    resp = timed_frame(s, 10)[0]
-    assert resp[0] == 0xC2, "token should be accepted"
+    for _ in range(6):
+        s = solver.connect(9001)
+        s.sendall(b"A" * 16)
+        d1, mA = timed_frame(s, 10)
+        d2, mB = timed_frame(s, 10)
+        assert d1[0] == 0xC1
+        delta = mA - mB
+        assert abs(delta) < 60, f"decoy banner should have ~equal delays, delta={delta:.0f}ms"
+        a = len(d1) - 24
+        b = 0 if delta < 0 else 1
+        sid = d1[1:5]
+        s.sendall(bytes([(3 * a + 5 * b + 0x41) & 0xFF]))
+        resp = timed_frame(s, 10)[0]
+        if resp[0] == 0xC2:
+            break
+        s.close()
+    else:
+        raise AssertionError("decoy session never accepted token")
     for i in range(4):
         s.sendall(bytes([sid[i]]))
         assert s.recv(1) == bytes([sid[i]])
@@ -61,7 +66,7 @@ def test_probe_decoy():
     s.close()
     hdelta = hA - hB
     assert abs(hdelta) < 60, f"decoy hc should have ~equal delays, delta={hdelta:.0f}ms"
-    port = UDP_BASE + len(hc1) * 7
+    port = UDP_BASE + (len(hc1) % 2)
     u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     u.settimeout(2.0)
     u.sendto(sid, (HOST, port))

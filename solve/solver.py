@@ -10,7 +10,9 @@ import time
 HOST = None
 GATE = 9001
 C2 = 9002
-UDP_BASE = 20000
+UDP_BASE = 20001
+NUDP = 2
+UDP_PORTS = None
 NFRAG = 4
 
 DELTA_MIN = 60.0
@@ -109,8 +111,15 @@ def run_session(verbose=False):
     raise RuntimeError("token rejected repeatedly")
 
 
+def udp_port_for(l3):
+    idx = l3 % NUDP
+    if UDP_PORTS:
+        return UDP_PORTS[idx]
+    return UDP_BASE + idx
+
+
 def udp_fetch(sess):
-    port = UDP_BASE + sess["l3"] * 7
+    port = udp_port_for(sess["l3"])
     u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     u.settimeout(3.0)
     try:
@@ -176,12 +185,17 @@ def probe_mode(samples):
 
 
 def main():
-    global HOST
+    global HOST, UDP_PORTS
     ap = argparse.ArgumentParser()
     ap.add_argument("host")
     ap.add_argument("--probe", type=int, default=0)
+    ap.add_argument("--udp-ports", default="",
+                    help="comma-separated external UDP ports in Specfile order "
+                         "(e.g. Dreamhack assigned ports for 20001..20002)")
     args = ap.parse_args()
     HOST = args.host
+    if args.udp_ports:
+        UDP_PORTS = [int(p) for p in args.udp_ports.split(",")]
     if args.probe:
         probe_mode(args.probe)
         return
@@ -191,7 +205,7 @@ def main():
             try:
                 sess = run_session(verbose=True)
                 tk = udp_fetch(sess)
-                port = UDP_BASE + sess["l3"] * 7
+                port = udp_port_for(sess["l3"])
                 print(f"[+] session {i} sid={sess['sid'].hex()} l3={sess['l3']} "
                       f"udp_port={port} tk={tk.hex()}")
                 finale(sess, tk, verbose=True)

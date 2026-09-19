@@ -8,14 +8,30 @@ import time
 
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = int(os.environ.get("BTA_PORT", "9001"))
-UDP_BASE = int(os.environ.get("BTA_UDP_BASE", "20000"))
-FLAG = os.environ.get("BTA_FLAG", "LR{b3tw33n_th3_ACKs_1s_wh3r3_th3_pr0t0c0l_l1v3s}").encode()
+UDP_BASE = int(os.environ.get("BTA_UDP_BASE", "20001"))
+NUDP = 2
+
+
+def load_flag():
+    v = os.environ.get("BTA_FLAG")
+    if v:
+        return v.encode()
+    try:
+        with open("/flag", "rb") as f:
+            data = f.read().strip()
+            if data:
+                return data
+    except OSError:
+        pass
+    return b"LR{b3tw33n_th3_ACKs_1s_wh3r3_th3_pr0t0c0l_l1v3s}"
+
+
+FLAG = load_flag()
 NFRAG = 4
 MAX_CONN = 64
 SESSION_TTL = 600.0
 IDLE_TIMEOUT = 30.0
 UDP_TTL = 15.0
-UDP_IP_SPACING = 0.3
 PER_IP_LIMIT = int(os.environ.get("BTA_PER_IP_LIMIT", "6"))
 
 JIT = 0.025
@@ -51,7 +67,7 @@ def keystream(k, n):
 class Sess:
     __slots__ = ("sid", "sid_int", "a", "b", "c", "l3", "fail", "poisoned",
                  "shaped", "echo_ok", "seg_ok", "udp_done", "tk", "used",
-                 "ts", "leak", "slot", "udp_open")
+                 "ts", "leak", "slot", "udp_deadline")
 
     def __init__(self):
         self.sid = os.urandom(4)
@@ -71,7 +87,7 @@ class Sess:
         self.ts = time.time()
         self.leak = None
         self.slot = None
-        self.udp_open = False
+        self.udp_deadline = 0.0
 
     def rechallenge(self):
         self.a = random.randrange(16)
@@ -92,8 +108,6 @@ class Glob:
         self.sessions = {}
         self.run_counter = 0
         self.last_leak = 0
-        self.udp_lock = threading.Lock()
-        self.ip_last_udp = {}
         self.conn_sem = threading.Semaphore(MAX_CONN)
 
     def gc(self):
@@ -203,60 +217,30 @@ def make_blob_t(sess, magic, total):
     return frame(bytes(body) + pad)
 
 
-def udp_open_for(sess, ip):
-    while True:
-        with G.udp_lock:
-            now = time.time()
-            last = G.ip_last_udp.get(ip, 0.0)
-            wait = UDP_IP_SPACING - (now - last)
-            if wait <= 0:
-                break
-        if wait > 3.0:
-            return None
-        time.sleep(wait)
-    for _ in range(8):
-        port = UDP_BASE + sess.l3 * 7
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.bind((LISTEN_HOST, port))
-        except OSError:
-            s.close()
-            sess.l3 = random.randrange(1, 701)
-            continue
-        with G.udp_lock:
-            G.ip_last_udp[ip] = time.time()
-        sess.tk = os.urandom(8)
-        sess.udp_open = True
-        t = threading.Thread(target=udp_loop, args=(sess, s), daemon=True)
-        t.start()
-        return port
-    return None
-
-
-def udp_loop(sess, sock):
-    until = time.time() + UDP_TTL
+def udp_responder(sock, port):
     sock.settimeout(1.0)
-    while time.time() < until:
+    while True:
         try:
-            data, addr = sock.recvfrom(8)
+            data, addr = sock.recvfrom(16)
         except socket.timeout:
             continue
         except OSError:
-            break
-        if sess.udp_done or sess.used:
+            return
+        if len(data) != 4:
             continue
-        if len(data) == 4 and struct.unpack(">I", data)[0] == sess.sid_int:
-            if sess.tk:
-                try:
-                    sock.sendto(sess.tk, addr)
-                except OSError:
-                    pass
-                sess.udp_done = True
-    try:
-        sock.close()
-    except OSError:
-        pass
-    sess.udp_open = False
+        sid_int = struct.unpack(">I", data)[0]
+        with G.lock:
+            sess = G.sessions.get(sid_int)
+            ok = (sess is not None and sess.genuine and sess.tk is not None
+                  and not sess.udp_done and not sess.used
+                  and time.time() < sess.udp_deadline
+                  and UDP_BASE + (sess.l3 % NUDP) == port)
+        if ok:
+            try:
+                sock.sendto(sess.tk, addr)
+            except OSError:
+                pass
+            sess.udp_done = True
 
 
 def echo_phase(sock, sess):
@@ -390,7 +374,8 @@ def handle(conn, addr):
                 seg = echo_phase(conn, sess)
                 sess.seg_ok = seg
                 if sess.genuine:
-                    udp_open_for(sess, ip)
+                    sess.tk = os.urandom(8)
+                    sess.udp_deadline = time.time() + UDP_TTL
                     dA, dB = (D_HC[0], D_HC[1]) if sess.c == 0 else (D_HC[1], D_HC[0])
                 else:
                     dA = dB = D_HC_DECOY
@@ -484,6 +469,11 @@ def listener(port, handler):
 
 def main():
     threading.Thread(target=gc_loop, daemon=True).start()
+    for i in range(NUDP):
+        port = UDP_BASE + i
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind((LISTEN_HOST, port))
+        threading.Thread(target=udp_responder, args=(s, port), daemon=True).start()
     threading.Thread(target=listener, args=(LISTEN_PORT, handle), daemon=True).start()
     listener(LISTEN_PORT + 1, handle_c2)
 
